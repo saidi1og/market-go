@@ -12,7 +12,6 @@ import {
   Image,
   Keyboard,
   KeyboardAvoidingView,
-  Platform,
   ScrollView,
   StatusBar,
   StyleSheet,
@@ -302,18 +301,37 @@ function normalizeStallCode(value: string) {
   return value.replace(/\s+/g, "").toUpperCase();
 }
 
-// Turns "mus0101" into "MUS-01-001" while typing; hyphens only appear once
-// the next group has a character, so backspace never gets stuck.
+// Turns "mus0101" or "mu0s0101" into "MUS-01-001". Letters and digits are
+// collected separately so a digit typed before the third letter is kept.
+// Hyphens only appear once the next group has a character, so backspace
+// never gets stuck on a separator.
 function formatStallCode(value: string) {
   const raw = value.toUpperCase().replace(/[^A-Z0-9]/g, "");
   const letters = raw.replace(/[^A-Z]/g, "").slice(0, 3);
-  const digits = raw.slice(letters.length).replace(/\D/g, "").slice(0, 5);
+  const digits = raw.replace(/[^0-9]/g, "").slice(0, 5);
   const parts = [letters, digits.slice(0, 2), digits.slice(2, 5)];
   return parts.filter(Boolean).join("-");
 }
 
 function normalizeContact(value: string) {
   return value.replace(/[\s\-().]/g, "");
+}
+
+function isVideoAsset(asset: {
+  type?: string | null;
+  mimeType?: string | null;
+  fileName?: string | null;
+}) {
+  if (asset.type === "video" || asset.type === "pairedVideo") {
+    return true;
+  }
+
+  if (asset.mimeType?.toLowerCase().startsWith("video/")) {
+    return true;
+  }
+
+  const fileName = asset.fileName?.toLowerCase() ?? "";
+  return /\.(mp4|mov|m4v|avi|mkv|webm|3gp)$/.test(fileName);
 }
 
 function validateForm(values: FormValues): FormErrors {
@@ -444,13 +462,26 @@ function ZoneCard({ zone }: { zone: MarketZone }) {
   );
 }
 
-function EmptyState({ query }: { query: string }) {
+function EmptyState({
+  query,
+  statusFilter,
+}: {
+  query: string;
+  statusFilter: StatusFilter;
+}) {
+  const search = query.trim();
+  const statusText =
+    statusFilter === "All" ? "" : ` in ${statusFilter.toLowerCase()} zones`;
+
   return (
     <View style={styles.emptyContainer}>
       <Text style={styles.emptyTitle}>No zones found</Text>
       <Text style={styles.emptyMessage}>
-        No market zone matches “{query}”. Try another name, category, status, or
-        priority.
+        {search
+          ? `No market zone matches “${search}”${statusText}. Try another name, category, status, or priority.`
+          : statusFilter === "All"
+            ? "No market zones are available right now."
+            : `No ${statusFilter.toLowerCase()} market zones right now.`}
       </Text>
     </View>
   );
@@ -596,7 +627,9 @@ function CatalogScreen() {
         contentContainerStyle={styles.list}
         keyboardShouldPersistTaps="handled"
         ListHeaderComponent={listHeader}
-        ListEmptyComponent={<EmptyState query={query} />}
+        ListEmptyComponent={
+          <EmptyState query={query} statusFilter={statusFilter} />
+        }
       />
     </View>
   );
@@ -611,10 +644,13 @@ function NewInspectionScreen() {
   const [errors, setErrors] = useState<FormErrors>({});
   const [imageMessage, setImageMessage] = useState("");
   const [showErrorSummary, setShowErrorSummary] = useState(false);
+  const valuesRef = useRef(values);
+  valuesRef.current = values;
 
   const errorCount = Object.values(errors).filter(Boolean).length;
 
   useEffect(() => {
+    valuesRef.current = INITIAL_FORM_VALUES;
     setValues(INITIAL_FORM_VALUES);
     setTouched(INITIAL_TOUCHED);
     setErrors({});
@@ -626,7 +662,8 @@ function NewInspectionScreen() {
     field: K,
     value: FormValues[K]
   ) {
-    const nextValues = { ...values, [field]: value };
+    const nextValues = { ...valuesRef.current, [field]: value };
+    valuesRef.current = nextValues;
     setValues(nextValues);
 
     const nextErrors = validateForm(nextValues);
@@ -635,18 +672,16 @@ function NewInspectionScreen() {
       setShowErrorSummary(false);
     }
 
-    if (touched[field]) {
-      setErrors((previous) => ({
-        ...previous,
-        [field]: nextErrors[field],
-      }));
-    }
+    setErrors((previous) => ({
+      ...previous,
+      [field]: nextErrors[field],
+    }));
   }
 
   function handleBlur(field: keyof FormValues) {
     setTouched((previous) => ({ ...previous, [field]: true }));
 
-    const nextErrors = validateForm(values);
+    const nextErrors = validateForm(valuesRef.current);
     setErrors((previous) => ({
       ...previous,
       [field]: nextErrors[field],
@@ -679,22 +714,18 @@ function NewInspectionScreen() {
         }
       }
 
+      const pickerOptions = {
+        mediaTypes: ["images"] as ImagePicker.MediaType[],
+        allowsEditing: false,
+        quality: 0.6,
+      };
+
       const result =
         source === "camera"
-          ? await ImagePicker.launchCameraAsync({
-              allowsEditing: false,
-              quality: 0.6,
-            })
-          : await ImagePicker.launchImageLibraryAsync({
-              mediaTypes: ["images"] as any,
-              allowsEditing: false,
-              quality: 0.6,
-            });
+          ? await ImagePicker.launchCameraAsync(pickerOptions)
+          : await ImagePicker.launchImageLibraryAsync(pickerOptions);
 
-      const canceled =
-        (result as any).canceled ?? (result as any).cancelled;
-
-      if (canceled) {
+      if (result.canceled) {
         setImageMessage(
           source === "camera"
             ? "Photo capture cancelled."
@@ -703,14 +734,14 @@ function NewInspectionScreen() {
         return;
       }
 
-      const asset = result.assets?.[0];
+      const asset = result.assets[0];
 
       if (!asset?.uri) {
         setImageMessage("No image was returned.");
         return;
       }
 
-      if ((asset as any).type === "videos") {
+      if (isVideoAsset(asset)) {
         setImageMessage("Please select an image, not a video.");
         return;
       }
@@ -734,7 +765,8 @@ function NewInspectionScreen() {
   function handleSubmit() {
     Keyboard.dismiss();
 
-    const nextErrors = validateForm(values);
+    const currentValues = valuesRef.current;
+    const nextErrors = validateForm(currentValues);
 
     setErrors(nextErrors);
     setTouched(ALL_TOUCHED);
@@ -747,24 +779,22 @@ function NewInspectionScreen() {
     setShowErrorSummary(false);
 
     const draft: InspectionDraft = {
-      vendorAlias: values.vendorAlias.trim(),
-      stallCode: normalizeStallCode(values.stallCode),
-      category: values.category,
-      contactNumber: normalizeContact(values.contactNumber),
-      riskLevel: values.riskLevel as RiskLevel,
-      consent: values.consent,
-      imageUrl: values.imageUrl.trim(),
+      vendorAlias: currentValues.vendorAlias.trim(),
+      stallCode: normalizeStallCode(currentValues.stallCode),
+      category: currentValues.category,
+      contactNumber: normalizeContact(currentValues.contactNumber),
+      riskLevel: currentValues.riskLevel as RiskLevel,
+      consent: currentValues.consent,
+      imageUrl: currentValues.imageUrl.trim(),
     };
 
     navigation.navigate("Review", { draft });
   }
 
   return (
-    <KeyboardAvoidingView
-      style={styles.screen}
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
-    >
+    <KeyboardAvoidingView style={styles.screen} behavior="padding">
       <ScrollView
+        style={styles.screen}
         contentContainerStyle={styles.formContainer}
         keyboardShouldPersistTaps="handled"
       >
@@ -1427,11 +1457,14 @@ const styles = StyleSheet.create({
     borderBottomColor: "#E2E8F0",
   },
   title: {
+    flex: 1,
+    flexShrink: 1,
     fontSize: 20,
     fontWeight: "700",
     color: "#0F172A",
   },
   groupPill: {
+    flexShrink: 0,
     paddingHorizontal: 10,
     paddingVertical: 5,
     borderRadius: 999,
